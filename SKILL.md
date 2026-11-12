@@ -1,65 +1,72 @@
 ---
-name: YouTube Music
+name: youtube-music
 description: Search and play music on YouTube Music, control playback (pause/resume/next/previous/volume/seek), queue albums and playlists, and check what is currently playing. Use when the user asks to play, search for, or control music, especially "YouTube Music", "YTM", "song", "album", or "playlist".
 ---
 
 # YouTube Music
 
-A local CLI named `ytm` wraps `ytmusicapi` for search and `mpv` + `yt-dlp` for audio playback. It runs in the background and is controlled over mpv's IPC socket.
+## Overview
 
-If `ytm` is not on PATH, use `~/.local/bin/ytm`; if the install lives elsewhere, set `YTM_HOME` to its directory.
+`ytm` is a local CLI that wraps `ytmusicapi` for YouTube Music search/metadata and `mpv` + `yt-dlp` for background audio playback over a local JSON IPC socket.
 
-All commands print JSON.
+If `ytm` is not on `PATH`, run `~/.local/bin/ytm`. If it was installed to a custom directory, set `YTM_HOME` accordingly.
 
-## Search
+## When to Use
+
+- Searching YouTube Music for songs, videos, albums, artists, or playlists
+- Playing a track, URL, album (`browseId`), or playlist (`playlistId`) in the background
+- Controlling active playback (`status`, `pause`, `resume`, `toggle`, `next`, `prev`, `volume`, `seek`, `stop`)
+- Checking local dependencies and playback state with `ytm doctor`
+
+## Quick Start
 
 ```bash
+# Search
 ytm search "query" --limit 10
 ytm search "query" --type songs|videos|albums|artists|playlists
-```
 
-Results include `title`, `artist`, `album`, `duration`, `videoId`, `url`, `playlistId`, and `browseId` when available. Use `playlistId` for `play-playlist`, and `browseId` for `play-album`.
-
-## Play
-
-```bash
+# Play
 ytm play "song or artist query"      # search songs, play the first match
-ytm play-url "https://..."           # play any URL mpv/yt-dlp supports
+ytm play-url "https://..."           # play an http(s) or ytdl:// URL
 ytm play-playlist PLAYLIST_ID        # queue up to 50 tracks
 ytm play-album BROWSE_ID             # queue a full album
-```
 
-Playback is audio-only and runs in the background. Only start playback when the user asks; don't play something just because they mentioned a song.
-
-## Control
-
-```bash
+# Control playback
 ytm status
 ytm pause
 ytm resume
 ytm toggle
 ytm next
 ytm prev
-ytm stop
 ytm volume 65
 ytm seek 42
-```
+ytm stop
 
-`status` returns `running`, `idle`, `paused`, `title`, `artist`, `album`, `position`, `duration`, `volume`, `playlist_position`, and `playlist_count`.
-
-## Diagnostics
-
-```bash
+# Diagnostics
 ytm doctor
 ```
 
-Checks `python3`, `mpv`, `yt-dlp`, `ffmpeg`, the `ytmusicapi` version, the data directory, OAuth state, and the IPC socket.
+## Workflow
+
+1. For direct song requests (`"play Tame Impala"`), run `ytm play "<query>"`.
+2. For albums or playlists, run `ytm search "<query>" --type albums` (or `playlists`), grab `browseId` (or `playlistId`), and pass it to `ytm play-album` (or `ytm play-playlist`).
+3. Confirm playback state or current track metadata with `ytm status`.
+
+## Output Format
+
+All commands output JSON (`now_playing`, `status`, search result arrays, or `{"error": "..."}` on failure).
+Search results include `title`, `artist`, `album`, `duration`, `videoId`, `url`, `playlistId`, and `browseId` when available.
+`status` returns `running`, `idle`, `paused`, `title`, `artist`, `album`, `position`, `duration`, `volume`, `playlist_position`, and `playlist_count`.
+
+## Anti-Patterns
+
+- Do not start playback unless the user asks to play something; searching or answering a question about a song should not trigger audio.
+- Do not pass raw search text to `play-album` or `play-playlist`; look up `browseId` or `playlistId` with `ytm search` first.
+- Do not use this project to download media or bypass access controls; it is an unofficial local player and users must follow YouTube's Terms of Service.
 
 ## Notes
 
-- Search works anonymously. Personal library and private playlists need OAuth: set `YT_CLIENT_ID` and `YT_CLIENT_SECRET` (a Google Cloud OAuth client), then run `ytm auth`.
-- A yt-dlp compatibility extractor option is enabled by default; update `yt-dlp` if YouTube changes its behavior.
-- Playback diagnostics are logged to `$YTM_HOME/mpv.log` (default `~/.local/share/ytm/mpv.log`).
+- Search and public playback work anonymously. For personal library and private playlists, set `YT_CLIENT_ID` and `YT_CLIENT_SECRET` and run `ytm auth`.
+- Playback logs are written to `$YTM_HOME/mpv.log` (default `~/.local/share/ytm/mpv.log`).
 - The IPC socket is `$XDG_RUNTIME_DIR/ytm-mpv.sock` when available, otherwise `$YTM_HOME/ytm-mpv.sock`.
-- Set `YTM_AO=null` to test playback silently without touching the speakers.
-- This is an unofficial client. Use it only for lawful, personal playback and respect YouTube's Terms of Service.
+- Set `YTM_AO=null` to test playback silently.
