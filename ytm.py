@@ -18,6 +18,12 @@ import time
 from pathlib import Path
 
 VERSION = "0.1.2"
+IPC_BUFFER_SIZE = 65536
+MPV_START_POLLS = 200
+STOP_WAIT_POLLS = 30
+MAX_VOLUME = 130
+MAX_ERROR_LEN = 1000
+ALLOWED_URL_SCHEMES = ("http://", "https://", "ytdl://")
 
 try:
     import ytmusicapi
@@ -106,6 +112,8 @@ def compact(item: dict) -> dict:
 
 
 def do_search(query: str, kind: str, limit: int) -> list[dict]:
+    if limit < 1:
+        die("--limit must be at least 1")
     results = get_yt().search(query, filter=kind, limit=limit) or []
     return [compact(result) for result in results][:limit]
 
@@ -121,19 +129,19 @@ def ipc(command: list, timeout: float = 3.0):
         request = {"command": command, "request_id": 1}
         sock.sendall((json.dumps(request) + "\n").encode())
         buf = b""
-        while b"\n" not in buf:
-            chunk = sock.recv(65536)
+        while True:
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if obj.get("request_id") == 1:
+                    return obj
+            chunk = sock.recv(IPC_BUFFER_SIZE)
             if not chunk:
-                break
+                return None
             buf += chunk
-        for line in buf.splitlines():
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if obj.get("request_id") == 1:
-                return obj
-        return None
     except (OSError, ValueError):
         return None
     finally:
@@ -155,10 +163,15 @@ def mpv_running() -> bool:
     return SOCKET.exists() and ipc(["get_property", "idle-active"]) is not None
 
 
+def require_running():
+    if not mpv_running():
+        die("mpv is not running")
+
+
 def stop_mpv():
     if SOCKET.exists():
         ipc(["quit"])
-        for _ in range(30):
+        for _ in range(STOP_WAIT_POLLS):
             if not SOCKET.exists():
                 break
             time.sleep(0.1)
@@ -195,6 +208,7 @@ def start_mpv(urls: list[str]):
     ao = os.environ.get("YTM_AO")
     if ao:
         command.append(f"--ao={ao}")
+    command.append("--")
     command.extend(urls)
     with LOG.open("ab") as log:
         process = subprocess.Popen(
@@ -203,7 +217,7 @@ def start_mpv(urls: list[str]):
             stderr=log,
             start_new_session=True,
         )
-    for _ in range(200):
+    for _ in range(MPV_START_POLLS):
         if SOCKET.exists():
             return process
         if process.poll() is not None:
@@ -244,11 +258,22 @@ def wait_for_playback(timeout: float = 6.0) -> dict:
     return status()
 
 
+def validate_url(url: str) -> str:
+    cleaned = url.strip()
+    if not cleaned.startswith(ALLOWED_URL_SCHEMES):
+        die("URL must start with https://, http://, or ytdl://")
+    return cleaned
+
+
 def play_urls(urls: list[str], meta: dict | None = None):
+    if not urls:
+        die("no playable URLs provided")
     if mpv_running():
         ipc(["loadfile", urls[0], "replace"])
         for url in urls[1:]:
             ipc(["loadfile", url, "append"])
+        set_prop("pause", False)
+        time.sleep(0.3)
     else:
         start_mpv(urls)
     state = wait_for_playback()
@@ -276,6 +301,8 @@ def play_query(query: str):
 
 
 def playlist_urls(playlist_id: str, limit: int) -> tuple[list[str], list[dict]]:
+    if limit < 1:
+        die("--limit must be at least 1")
     playlist = get_yt().get_playlist(playlist_id, limit=limit)
     tracks = playlist.get("tracks") or []
     urls, metas = [], []
@@ -316,7 +343,26 @@ def doctor() -> dict:
     }
 
 
-def main():
+def run_auth():
+    client_id = os.environ.get("YT_CLIENT_ID")
+    client_secret = os.environ.get("YT_CLIENT_SECRET")
+    if not setup_oauth:
+        die("this ytmusicapi version does not support setup_oauth; upgrade ytmusicapi")
+    if not client_id or not client_secret:
+        die(
+            "OAuth needs a Google Cloud OAuth client. "
+            "Set YT_CLIENT_ID and YT_CLIENT_SECRET, then rerun `ytm auth`."
+        )
+    BASE.mkdir(parents=True, exist_ok=True, mode=0o700)
+    setup_oauth(client_id, client_secret, filepath=str(AUTH), open_browser=True)
+    try:
+        AUTH.chmod(0o600)
+    except OSError:
+        pass
+    return {"authenticated": str(AUTH)}
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ytm", description="YouTube Music CLI")
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -346,95 +392,85 @@ def main():
     play_album = sub.add_parser("play-album", help="queue an album")
     play_album.add_argument("browse_id")
 
-    sub.add_parser("pause", help="pause playback")
-    sub.add_parser("resume", help="resume playback")
-    sub.add_parser("toggle", help="toggle pause")
-    sub.add_parser("next", help="next track")
-    sub.add_parser("prev", help="previous track")
-    sub.add_parser("stop", help="stop playback")
-    sub.add_parser("status", help="show what is playing")
+    for name, help_text in (
+        ("pause", "pause playback"),
+        ("resume", "resume playback"),
+        ("toggle", "toggle pause"),
+        ("next", "next track"),
+        ("prev", "previous track"),
+        ("stop", "stop playback"),
+        ("status", "show what is playing"),
+        ("auth", "set up OAuth for your personal library"),
+        ("doctor", "check dependencies and playback state"),
+    ):
+        sub.add_parser(name, help=help_text)
 
-    volume = sub.add_parser("volume", help="set mpv volume (0-130)")
+    volume = sub.add_parser("volume", help=f"set mpv volume (0-{MAX_VOLUME})")
     volume.add_argument("level", type=float)
 
     seek = sub.add_parser("seek", help="seek to an absolute position in seconds")
     seek.add_argument("seconds", type=float)
+    return parser
 
-    sub.add_parser("auth", help="set up OAuth for your personal library")
-    sub.add_parser("doctor", help="check dependencies and playback state")
 
-    args = parser.parse_args()
+def handle_playback_command(args) -> dict:
+    if args.cmd == "stop":
+        stop_mpv()
+        return {"stopped": True}
+    if args.cmd == "status":
+        return status()
+    require_running()
+    if args.cmd == "pause":
+        set_prop("pause", True)
+        return {"paused": bool(get_prop("pause"))}
+    if args.cmd == "resume":
+        set_prop("pause", False)
+        return {"paused": bool(get_prop("pause"))}
+    if args.cmd == "toggle":
+        current = bool(get_prop("pause"))
+        set_prop("pause", not current)
+        return {"paused": not current}
+    if args.cmd in ("next", "prev"):
+        ipc(["playlist-next" if args.cmd == "next" else "playlist-prev"])
+        time.sleep(0.5)
+        return status()
+    if args.cmd == "volume":
+        set_prop("volume", max(0, min(MAX_VOLUME, args.level)))
+        return {"volume": get_prop("volume")}
+    ipc(["seek", max(0.0, args.seconds), "absolute"])
+    return status()
 
+
+def dispatch(args):
+    if args.cmd == "search":
+        return do_search(args.query, args.type, args.limit)
+    if args.cmd == "play":
+        return play_query(args.query)
+    if args.cmd == "play-url":
+        return play_urls([validate_url(args.url)])
+    if args.cmd == "play-playlist":
+        urls, metas = playlist_urls(args.playlist_id, args.limit)
+        if not urls:
+            die("playlist has no playable tracks")
+        return play_urls(urls, {"playlist": args.playlist_id, "tracks": len(urls), "first": metas[0]})
+    if args.cmd == "play-album":
+        urls, metas = album_urls(args.browse_id)
+        if not urls:
+            die("album has no playable tracks")
+        return play_urls(urls, {"album": args.browse_id, "tracks": len(urls), "first": metas[0]})
+    if args.cmd == "doctor":
+        return doctor()
+    if args.cmd == "auth":
+        return run_auth()
+    return handle_playback_command(args)
+
+
+def main():
+    args = build_parser().parse_args()
     try:
-        if args.cmd == "search":
-            print(json.dumps(do_search(args.query, args.type, args.limit),
-                             ensure_ascii=False, indent=2))
-        elif args.cmd == "play":
-            print(json.dumps(play_query(args.query), ensure_ascii=False, indent=2))
-        elif args.cmd == "play-url":
-            print(json.dumps(play_urls([args.url]), ensure_ascii=False, indent=2))
-        elif args.cmd == "play-playlist":
-            urls, metas = playlist_urls(args.playlist_id, args.limit)
-            if not urls:
-                die("playlist has no playable tracks")
-            meta = {"playlist": args.playlist_id, "tracks": len(urls), "first": metas[0]}
-            print(json.dumps(play_urls(urls, meta), ensure_ascii=False, indent=2))
-        elif args.cmd == "play-album":
-            urls, metas = album_urls(args.browse_id)
-            if not urls:
-                die("album has no playable tracks")
-            meta = {"album": args.browse_id, "tracks": len(urls), "first": metas[0]}
-            print(json.dumps(play_urls(urls, meta), ensure_ascii=False, indent=2))
-        elif args.cmd == "pause":
-            set_prop("pause", True)
-            print(json.dumps({"paused": bool(get_prop("pause"))}))
-        elif args.cmd == "resume":
-            set_prop("pause", False)
-            print(json.dumps({"paused": bool(get_prop("pause"))}))
-        elif args.cmd == "toggle":
-            current = bool(get_prop("pause"))
-            set_prop("pause", not current)
-            print(json.dumps({"paused": not current}))
-        elif args.cmd == "next":
-            ipc(["playlist-next"])
-            time.sleep(0.5)
-            print(json.dumps(status(), ensure_ascii=False, indent=2))
-        elif args.cmd == "prev":
-            ipc(["playlist-prev"])
-            time.sleep(0.5)
-            print(json.dumps(status(), ensure_ascii=False, indent=2))
-        elif args.cmd == "stop":
-            stop_mpv()
-            print(json.dumps({"stopped": True}))
-        elif args.cmd == "status":
-            print(json.dumps(status(), ensure_ascii=False, indent=2))
-        elif args.cmd == "volume":
-            set_prop("volume", max(0, min(130, args.level)))
-            print(json.dumps({"volume": get_prop("volume")}))
-        elif args.cmd == "seek":
-            ipc(["seek", args.seconds, "absolute"])
-            print(json.dumps(status(), ensure_ascii=False, indent=2))
-        elif args.cmd == "doctor":
-            print(json.dumps(doctor(), ensure_ascii=False, indent=2))
-        elif args.cmd == "auth":
-            client_id = os.environ.get("YT_CLIENT_ID")
-            client_secret = os.environ.get("YT_CLIENT_SECRET")
-            if not setup_oauth:
-                die("this ytmusicapi version does not support setup_oauth; upgrade ytmusicapi")
-            if not client_id or not client_secret:
-                die(
-                    "OAuth needs a Google Cloud OAuth client. "
-                    "Set YT_CLIENT_ID and YT_CLIENT_SECRET, then rerun `ytm auth`."
-                )
-            BASE.mkdir(parents=True, exist_ok=True, mode=0o700)
-            setup_oauth(client_id, client_secret, filepath=str(AUTH), open_browser=True)
-            try:
-                AUTH.chmod(0o600)
-            except OSError:
-                pass
-            print(json.dumps({"authenticated": str(AUTH)}))
+        print(json.dumps(dispatch(args), ensure_ascii=False, indent=2))
     except Exception as exc:
-        die(f"{type(exc).__name__}: {exc}"[:1000])
+        die(f"{type(exc).__name__}: {exc}"[:MAX_ERROR_LEN])
 
 
 if __name__ == "__main__":
