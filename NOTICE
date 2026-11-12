@@ -1,0 +1,36 @@
+ytm
+Copyright (c) 2026 mao1ix
+
+This product includes software developed by third parties. Those components
+are not bundled with this repository; they are installed separately by the
+user and remain subject to their own licenses and terms.
+
+Third-party components
+----------------------
+
+ytmusicapi
+License: MIT
+https://github.com/sigma67/ytmusicapi
+
+mpv
+License: GPL-2.0-or-later and LGPL-2.1-or-later, depending on the build
+https://github.com/mpv-player/mpv
+
+yt-dlp
+License: Unlicense
+https://github.com/yt-dlp/yt-dlp
+
+FFmpeg
+License: GPL or LGPL depending on the build; the Arch Linux package is
+GPL-3.0-only
+https://ffmpeg.org/legal.html
+
+Python
+License: PSF-2.0
+https://docs.python.org/3/license.html
+
+See THIRD_PARTY.md for links and COMPLIANCE.md for the license review.
+
+YouTube, YouTube Music, and related marks are trademarks of Google LLC.
+This project is unofficial and is not affiliated with, endorsed by, or
+sponsored by Google LLC or YouTube.
